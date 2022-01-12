@@ -1,7 +1,7 @@
-displayName: Sirius_geo
+displayName: SiriusGeo
 type: middleware
 
-import: github.com/bay1ts/Sirius_Plugin
+import: github.com/bay1ts/SiriusGeo
 
 summary: 'validate ip and geo'
 
