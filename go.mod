@@ -1,4 +1,4 @@
-module Sirius
+module SiriusGeo
 
 go 1.17
 
