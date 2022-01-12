@@ -1,4 +1,4 @@
-module SiriusGeo
+module github.com/bay1ts/SiriusGeo
 
 go 1.17
 
