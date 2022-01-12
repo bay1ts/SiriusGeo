@@ -1,0 +1,9 @@
+displayName: Sirius_geo
+type: middleware
+
+import: github.com/bay1ts/Sirius_Plugin
+
+summary: 'validate ip and geo'
+
+testData:
+  DatabaseFilePath: /tmp/test.db

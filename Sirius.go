@@ -57,6 +57,10 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 	}, nil
 }
 func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if p.db == nil {
+		p.next.ServeHTTP(rw, req)
+		return
+	}
 	for _, ip := range p.GetRemoteIPs(req) {
 		err := p.CheckAllowed(ip)
 		if err != nil {
