@@ -168,6 +168,16 @@ func (p Plugin) isAllowArea(ip string) error {
 			return err
 		}
 		countryCode := record.Country_short
+		if countryCode == "-" {
+			if p.allowPrivate {
+				return nil
+			} else {
+				return &NotAllowedError{
+					IP:     ip,
+					Reason: "private address",
+				}
+			}
+		}
 		for i := 0; i < len(p.allowedCountries); i++ {
 			if p.allowedCountries[i] == countryCode {
 				return nil
@@ -176,11 +186,12 @@ func (p Plugin) isAllowArea(ip string) error {
 		return &NotAllowedError{
 			Country: countryCode,
 			IP:      ip,
+			Reason:  "not allowed",
 		}
 	} else {
 		return &NotAllowedError{
-			Country: "all",
-			IP:      ip,
+			IP:     ip,
+			Reason: "not allowed",
 		}
 	}
 }
