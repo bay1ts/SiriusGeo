@@ -1,4 +1,4 @@
-package sirius
+package SiriusGeo
 
 import (
 	"context"
