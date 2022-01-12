@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/oschwald/geoip2-golang"
+
+	"github.com/ip2location/ip2location-go/v9"
 	"log"
 	"net"
 	"net/http"
@@ -22,8 +23,7 @@ type Config struct {
 type Plugin struct {
 	next                 http.Handler
 	name                 string
-	db                   *geoip2.Reader
-	enabled              bool
+	db                   *ip2location.DB
 	allowedCountries     []string
 	allowedIps           []string
 	allowPrivate         bool
@@ -40,7 +40,7 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		}, nil
 	}
 
-	db, err := geoip2.Open(cfg.DatabaseFilePath)
+	db, err := ip2location.OpenDB(cfg.DatabaseFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("%s: failed to open database: %w", name, err)
 	}
@@ -163,12 +163,11 @@ func (p Plugin) isAllowArea(ip string) error {
 	if len(p.allowedCountries) > 0 {
 		//todo
 		//defer p.db.Close()
-		netIp := net.ParseIP(ip)
-		record, err := p.db.City(netIp)
+		record, err := p.db.Get_country_short(ip)
 		if err != nil {
 			return err
 		}
-		countryCode := record.Country.IsoCode
+		countryCode := record.Country_short
 		for i := 0; i < len(p.allowedCountries); i++ {
 			if p.allowedCountries[i] == countryCode {
 				return nil
