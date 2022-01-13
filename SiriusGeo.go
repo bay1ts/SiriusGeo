@@ -20,6 +20,17 @@ type Config struct {
 	AllowPrivate         bool     // Allow requests from private / internal networks?
 	DisallowedStatusCode int      // HTTP status code to return for disallowed requests
 }
+
+func CreateConfig() *Config {
+	return &Config{
+		DatabaseFilePath:     "",
+		AllowedCountries:     []string{},
+		AllowedIP:            []string{},
+		AllowPrivate:         true,
+		DisallowedStatusCode: http.StatusForbidden,
+	}
+}
+
 type Plugin struct {
 	next                 http.Handler
 	name                 string
