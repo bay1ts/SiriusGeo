@@ -23,7 +23,7 @@ type Config struct {
 
 func CreateConfig() *Config {
 	return &Config{
-		DatabaseFilePath:     "",
+		DatabaseFilePath:     "/dd/IP2LOCATION-LITE-DB1.BIN",
 		AllowedCountries:     []string{},
 		AllowedIP:            []string{},
 		AllowPrivate:         true,
@@ -113,21 +113,28 @@ func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 
 	var ips []string
 	for ip := range uniqIPs {
+		log.Printf("此次请求获取到ip------%v", ip)
 		ips = append(ips, ip)
 	}
 
+	log.Printf("此次请求获取到ip数量------%v", len(ips))
 	return ips
 }
 func (p Plugin) CheckAllowed(ip string) error {
 	ipErr := p.isAllowIP(ip)
 	areaErr := p.isAllowArea(ip)
 
-	if areaErr != nil {
-		return areaErr
-	} else if ipErr != nil {
-		return ipErr
-	} else {
+	if ipErr == nil || areaErr == nil {
 		return nil
+	} else {
+		if areaErr != nil {
+			return areaErr
+		} else if ipErr != nil {
+			return ipErr
+		} else {
+			return nil
+		}
+
 	}
 }
 func (p Plugin) isAllowIP(ip string) error {
@@ -189,6 +196,7 @@ func (p Plugin) isAllowArea(ip string) error {
 				}
 			}
 		}
+		log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
 		for i := 0; i < len(p.allowedCountries); i++ {
 			if p.allowedCountries[i] == countryCode {
 				return nil

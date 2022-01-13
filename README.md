@@ -1,3 +1,3 @@
-# Sirius_Plugin
+# SiriusGeo Plugin
 
 used for geo block
