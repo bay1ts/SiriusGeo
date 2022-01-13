@@ -75,6 +75,7 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		if !p.CheckAllowed(ip) {
 			log.Printf("%s: %v", p.name, "禁止访问")
 			rw.WriteHeader(p.disallowedStatusCode)
+			rw.Write([]byte("禁止访问"))
 		}
 	}
 	p.next.ServeHTTP(rw, req)
