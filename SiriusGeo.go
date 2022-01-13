@@ -2,7 +2,6 @@ package SiriusGeo
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/ip2location/ip2location-go/v9"
@@ -73,18 +72,9 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	for _, ip := range p.GetRemoteIPs(req) {
-		err := p.CheckAllowed(ip)
-		if err != nil {
-			var notAllowedErr *NotAllowedError
-			if errors.As(err, &notAllowedErr) {
-				log.Printf("%s: %v", p.name, err)
-				rw.WriteHeader(p.disallowedStatusCode)
-				return
-			} else {
-				log.Printf("%s: %s - %v", p.name, req.Host, err)
-				rw.WriteHeader(p.disallowedStatusCode)
-				return
-			}
+		if !p.CheckAllowed(ip) {
+			log.Printf("%s: %v", p.name, "禁止访问")
+			rw.WriteHeader(p.disallowedStatusCode)
 		}
 	}
 	p.next.ServeHTTP(rw, req)
@@ -120,99 +110,61 @@ func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 	log.Printf("此次请求获取到ip数量------%v", len(ips))
 	return ips
 }
-func (p Plugin) CheckAllowed(ip string) error {
-	ipErr := p.isAllowIP(ip)
-	areaErr := p.isAllowArea(ip)
-
-	if ipErr == nil || areaErr == nil {
-		return nil
+func (p Plugin) CheckAllowed(ip string) bool {
+	if p.isAllowIP(ip) || p.isAllowArea(ip) {
+		return true
 	} else {
-		if areaErr != nil {
-			return areaErr
-		} else if ipErr != nil {
-			return ipErr
-		} else {
-			return nil
-		}
-
+		return false
 	}
 }
-func (p Plugin) isAllowIP(ip string) error {
+func (p Plugin) isAllowIP(ip string) bool {
 	ipAddress := net.ParseIP(ip)
 	isPrivateIp := p.IsPrivateIP(ipAddress, p.privateIPRanges)
 
 	if isPrivateIp && p.allowPrivate {
-		return nil
+		return true
 	} else if isPrivateIp && !p.allowPrivate {
-		return &NotAllowedError{
-			IP:      ip,
-			Country: "-",
-		}
-	}
-	if len(p.allowedIps) > 0 {
-		for _, allowedIp := range p.allowedIps {
-			if strings.Contains(allowedIp, "/") {
-				_, ipv4Net, err := net.ParseCIDR(allowedIp)
-				if err != nil {
-					continue
-				}
-				if ipv4Net.Contains(net.ParseIP(ip)) {
-					return nil
-				}
-			} else {
-				allowedIpStr := net.ParseIP(allowedIp)
-				if ip == allowedIpStr.String() {
-					return nil
+
+	} else {
+		if len(p.allowedIps) > 0 {
+			for _, allowedIp := range p.allowedIps {
+				if strings.Contains(allowedIp, "/") {
+					_, ipv4Net, err := net.ParseCIDR(allowedIp)
+					if err != nil {
+						continue
+					}
+					if ipv4Net.Contains(net.ParseIP(ip)) {
+						return true
+					}
+				} else {
+					allowedIpStr := net.ParseIP(allowedIp)
+					if ip == allowedIpStr.String() {
+						return true
+					}
 				}
 			}
 		}
-		return &NotAllowedError{
-			Country: "-",
-			IP:      ip,
-		}
-	} else {
-		return &NotAllowedError{
-			Country: "-",
-			IP:      "all",
-		}
 	}
+	return false
 }
-func (p Plugin) isAllowArea(ip string) error {
+func (p Plugin) isAllowArea(ip string) bool {
 	if len(p.allowedCountries) > 0 {
-		//todo
-		//defer p.db.Close()
-		record, err := p.db.Get_country_short(ip)
-		if err != nil {
-			return err
-		}
-		countryCode := record.Country_short
-		if countryCode == "-" {
-			if p.allowPrivate {
-				return nil
-			} else {
-				return &NotAllowedError{
-					IP:     ip,
-					Reason: "private address",
+		if record, err := p.db.Get_country_short(ip); err == nil {
+			countryCode := record.Country_short
+			if countryCode == "-" {
+				if p.allowPrivate {
+					return true
+				}
+			}
+			log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
+			for i := 0; i < len(p.allowedCountries); i++ {
+				if p.allowedCountries[i] == countryCode {
+					return true
 				}
 			}
 		}
-		log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
-		for i := 0; i < len(p.allowedCountries); i++ {
-			if p.allowedCountries[i] == countryCode {
-				return nil
-			}
-		}
-		return &NotAllowedError{
-			Country: countryCode,
-			IP:      ip,
-			Reason:  "not allowed",
-		}
-	} else {
-		return &NotAllowedError{
-			IP:     ip,
-			Reason: "not allowed",
-		}
 	}
+	return false
 }
 func (p Plugin) IsPrivateIP(ip net.IP, privateIPBlocks []*net.IPNet) bool {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
