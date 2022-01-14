@@ -114,21 +114,23 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			return
 		} else {
 			//waf
-			resp, err := httpClient.Do(proxyReq)
-			if err != nil {
-				http.Error(rw, err.Error(), http.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode >= 400 {
-				//block
-				cache[ip] = struct{}{}
-				return
-			}
+			go p.CallWaf(ip, rw, proxyReq)
 		}
 	}
 	p.next.ServeHTTP(rw, req)
+}
+func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, proxyReq *http.Request) {
+	resp, err := httpClient.Do(proxyReq)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		//block
+		log.Printf("%s: %v触发防火墙", p.name, ip)
+		cache[ip] = struct{}{}
+		return
+	}
 }
 func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 	uniqIPs := make(map[string]struct{})
