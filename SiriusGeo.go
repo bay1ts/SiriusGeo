@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	lru "github.com/hashicorp/golang-lru"
+	"github.com/hashicorp/golang-lru"
 	"github.com/ip2location/ip2location-go/v9"
 	"io/ioutil"
 	"log"

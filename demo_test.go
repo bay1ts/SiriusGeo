@@ -3,6 +3,7 @@ package SiriusGeo_test
 import (
 	"context"
 	"github.com/bay1ts/SiriusGeo"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ func TestDemo(t *testing.T) {
 	cfg := SiriusGeo.CreateConfig()
 	cfg.DatabaseFilePath = "D:\\Develop\\IP2LOCATION-LITE-DB1.BIN\\IP2LOCATION-LITE-DB1.BIN"
 	cfg.AllowedCountries = []string{"US"}
+	cfg.ModSecurityUrl = "aa"
 
 	ctx := context.Background()
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
@@ -29,7 +31,9 @@ func TestDemo(t *testing.T) {
 	}
 	req.Header.Set("X-Real-IP", "101.24.203.243")
 	handler.ServeHTTP(recorder, req)
-
+	resp := recorder.Result()
+	defer resp.Body.Close()
+	log.Printf("response -- %v", resp.Body)
 	assertHeader(t, req, "X-Host", "localhost")
 	assertHeader(t, req, "X-URL", "http://localhost")
 	assertHeader(t, req, "X-Method", "GET")
