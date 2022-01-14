@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/hashicorp/golang-lru"
 	"github.com/ip2location/ip2location-go/v9"
 	"io/ioutil"
 	"log"
@@ -40,10 +41,10 @@ func CreateConfig() *Config {
 }
 
 type Plugin struct {
-	next http.Handler
-	name string
-	db   *ip2location.DB
-
+	next                 http.Handler
+	name                 string
+	db                   *ip2location.DB
+	lruCache             *lru.Cache
 	modSecurityUrl       string
 	allowedCountries     []string
 	allowedIps           []string
@@ -68,6 +69,7 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		return nil, fmt.Errorf("%s: failed to open database: %w", name, err)
 	}
 
+	lruCache, err := lru.New(100)
 	return &Plugin{
 		db:                   db,
 		next:                 next,
@@ -78,6 +80,7 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		disallowedStatusCode: cfg.DisallowedStatusCode,
 		modSecurityUrl:       cfg.ModSecurityUrl,
 		privateIPRanges:      InitPrivateIPBlocks(),
+		lruCache:             lruCache,
 	}, nil
 }
 func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -107,7 +110,8 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		proxyReq.Header[h] = val
 	}
 	for _, ip := range p.GetRemoteIPs(req) {
-		if _, v := cache[ip]; v || !p.CheckAllowed(ip) {
+		//if _, v := cache[ip]; v || !p.CheckAllowed(ip) {
+		if p.lruCache.Contains(ip) || !p.CheckAllowed(ip) {
 			log.Printf("%s: %v", p.name, "禁止访问")
 			rw.WriteHeader(p.disallowedStatusCode)
 			rw.Write([]byte(fmt.Sprintf("Your IP {%s} is denied to access", ip)))
@@ -129,6 +133,7 @@ func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, proxyReq *http.Reques
 		//block
 		log.Printf("%s: %v触发防火墙", p.name, ip)
 		cache[ip] = struct{}{}
+		p.lruCache.Add(ip, nil)
 		return
 	}
 }
