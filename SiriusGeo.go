@@ -1,16 +1,24 @@
 package SiriusGeo
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/ip2location/ip2location-go/v9"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
+
+var httpClient = &http.Client{
+	Timeout: time.Second * 2,
+}
+var cache, _ = lru.New(1024)
 
 type Config struct {
 	DatabaseFilePath     string   // Path to ip2location database file
@@ -18,11 +26,12 @@ type Config struct {
 	AllowedIP            []string // Whitelist of ip to allow
 	AllowPrivate         bool     // Allow requests from private / internal networks?
 	DisallowedStatusCode int      // HTTP status code to return for disallowed requests
+	ModSecurityUrl       string
 }
 
 func CreateConfig() *Config {
 	return &Config{
-		DatabaseFilePath:     "/dd/IP2LOCATION-LITE-DB1.BIN",
+		DatabaseFilePath:     "/db/IP2LOCATION-LITE-DB1.BIN",
 		AllowedCountries:     []string{},
 		AllowedIP:            []string{},
 		AllowPrivate:         true,
@@ -31,9 +40,11 @@ func CreateConfig() *Config {
 }
 
 type Plugin struct {
-	next                 http.Handler
-	name                 string
-	db                   *ip2location.DB
+	next http.Handler
+	name string
+	db   *ip2location.DB
+
+	modSecurityUrl       string
 	allowedCountries     []string
 	allowedIps           []string
 	allowPrivate         bool
@@ -49,7 +60,9 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 			name: name,
 		}, nil
 	}
-
+	if len(cfg.ModSecurityUrl) == 0 {
+		return nil, fmt.Errorf("modSecurityUrl cannot be empty")
+	}
 	db, err := ip2location.OpenDB(cfg.DatabaseFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("%s: failed to open database: %w", name, err)
@@ -63,6 +76,7 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		allowedIps:           cfg.AllowedIP,
 		allowPrivate:         cfg.AllowPrivate,
 		disallowedStatusCode: cfg.DisallowedStatusCode,
+		modSecurityUrl:       cfg.ModSecurityUrl,
 		privateIPRanges:      InitPrivateIPBlocks(),
 	}, nil
 }
@@ -75,14 +89,43 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		p.next.ServeHTTP(rw, req)
 		return
 	}
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Body = ioutil.NopCloser(bytes.NewReader(body))
+	url := fmt.Sprintf("%s%s", p.modSecurityUrl, req.RequestURI)
+	proxyReq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
+
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	proxyReq.Header = make(http.Header)
+	for h, val := range req.Header {
+		proxyReq.Header[h] = val
+	}
 	for _, ip := range p.GetRemoteIPs(req) {
-		if !p.CheckAllowed(ip) {
+		if !cache.Contains(ip) || !p.CheckAllowed(ip) {
 			log.Printf("%s: %v", p.name, "禁止访问")
 			rw.WriteHeader(p.disallowedStatusCode)
 			rw.Write([]byte(fmt.Sprintf("Your IP {%s} is denied to access", ip)))
 			return
 		} else {
 			//waf
+			resp, err := httpClient.Do(proxyReq)
+			if err != nil {
+				http.Error(rw, err.Error(), http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode >= 400 {
+				//block
+				cache.Add(ip, nil)
+				return
+			}
 		}
 	}
 	p.next.ServeHTTP(rw, req)
