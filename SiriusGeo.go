@@ -43,7 +43,7 @@ type Plugin struct {
 
 func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
 	if _, err := os.Stat(cfg.DatabaseFilePath); err != nil {
-		log.Printf("[geoip2] DB `%s' not found: %v", cfg.DatabaseFilePath, err)
+		log.Printf("[ip2location] DB `%s' not found: %v", cfg.DatabaseFilePath, err)
 		return &Plugin{
 			next: next,
 			name: name,
@@ -67,6 +67,10 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 	}, nil
 }
 func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if isWebsocket(req) {
+		p.next.ServeHTTP(rw, req)
+		return
+	}
 	if p.db == nil {
 		p.next.ServeHTTP(rw, req)
 		return
@@ -75,8 +79,10 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		if !p.CheckAllowed(ip) {
 			log.Printf("%s: %v", p.name, "禁止访问")
 			rw.WriteHeader(p.disallowedStatusCode)
-			rw.Write([]byte("禁止访问"))
+			rw.Write([]byte(fmt.Sprintf("Your IP {%s} is denied to access", ip)))
 			return
+		} else {
+			//waf
 		}
 	}
 	p.next.ServeHTTP(rw, req)
@@ -105,11 +111,9 @@ func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 
 	var ips []string
 	for ip := range uniqIPs {
-		log.Printf("此次请求获取到ip------%v", ip)
 		ips = append(ips, ip)
 	}
 
-	log.Printf("此次请求获取到ip数量------%v", len(ips))
 	return ips
 }
 func (p Plugin) CheckAllowed(ip string) bool {
@@ -221,4 +225,12 @@ func InitPrivateIPBlocks() []*net.IPNet {
 	}
 
 	return privateIPBlocks
+}
+func isWebsocket(req *http.Request) bool {
+	for _, header := range req.Header["Upgrade"] {
+		if header == "websocket" {
+			return true
+		}
+	}
+	return false
 }
