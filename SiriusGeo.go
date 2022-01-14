@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/hashicorp/golang-lru"
 	"github.com/ip2location/ip2location-go/v9"
 	"io/ioutil"
 	"log"
@@ -18,7 +17,8 @@ import (
 var httpClient = &http.Client{
 	Timeout: time.Second * 2,
 }
-var cache, _ = lru.New(1024)
+
+var cache = make(map[string]struct{})
 
 type Config struct {
 	DatabaseFilePath     string   // Path to ip2location database file
@@ -107,7 +107,7 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		proxyReq.Header[h] = val
 	}
 	for _, ip := range p.GetRemoteIPs(req) {
-		if !cache.Contains(ip) || !p.CheckAllowed(ip) {
+		if _, v := cache[ip]; v || !p.CheckAllowed(ip) {
 			log.Printf("%s: %v", p.name, "禁止访问")
 			rw.WriteHeader(p.disallowedStatusCode)
 			rw.Write([]byte(fmt.Sprintf("Your IP {%s} is denied to access", ip)))
@@ -123,7 +123,7 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 			if resp.StatusCode >= 400 {
 				//block
-				cache.Add(ip, nil)
+				cache[ip] = struct{}{}
 				return
 			}
 		}
