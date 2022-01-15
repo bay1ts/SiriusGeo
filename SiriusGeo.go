@@ -44,6 +44,7 @@ type Plugin struct {
 	db                   *ip2location.DB
 	wafCache             gcache.Cache
 	geoCache             gcache.Cache
+	allowedCache         gcache.Cache
 	modSecurityUrl       string
 	allowedCountries     []string
 	allowedIps           []string
@@ -69,8 +70,9 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		return nil, fmt.Errorf("%s: failed to open database: %w", name, err)
 	}
 
-	wafCache := gcache.New(2048).LRU().Build()
+	wafCache := gcache.New(2048).LRU().Expiration(time.Hour).Build()
 	geoCache := gcache.New(10240).LRU().Expiration(time.Minute * 30).Build()
+	allowedCache := gcache.New(128).LRU().Expiration(time.Hour * 24).Build()
 	c := 0
 	return &Plugin{
 		db:                   db,
@@ -84,6 +86,7 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		privateIPRanges:      InitPrivateIPBlocks(),
 		wafCache:             wafCache,
 		geoCache:             geoCache,
+		allowedCache:         allowedCache,
 		counter:              &c,
 	}, nil
 }
@@ -97,14 +100,12 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	*p.counter += 1
-	log.Printf("%s: access count %v", p.name, *p.counter)
 	if *p.counter >= 5 {
 		*p.counter = 0
-		log.Printf("%s: geoCache hit rate= %v,wafCache hit rate= %v", p.name, p.geoCache.HitRate(), p.wafCache.HitRate())
+		log.Printf("%s: geoCache hit rate= %v,wafCache hit rate= %v,allowedCache hit rate=%v", p.name, p.geoCache.HitRate(), p.wafCache.HitRate(), p.allowedCache.HitRate())
 	}
 	for _, ip := range p.GetRemoteIPs(req) {
 		if _, notFound := p.wafCache.GetIFPresent(ip); notFound == nil || !p.CheckAllowed(ip) {
-			//if p.wafCache.Has(ip) || !p.CheckAllowed(ip) {
 			log.Printf("%s: %v access denied", p.name, ip)
 			rw.WriteHeader(p.disallowedStatusCode)
 			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -125,7 +126,6 @@ func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, req *http.Request) {
 	req.Body = ioutil.NopCloser(bytes.NewReader(body))
 	url := fmt.Sprintf("%s%s", p.modSecurityUrl, req.RequestURI)
 	proxyReq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
-
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
@@ -139,17 +139,14 @@ func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		//block
-		log.Printf("%s: %v 触发防火墙", p.name, ip)
-		//cache[ip] = struct{}{}
-		p.wafCache.SetWithExpire(ip, nil, time.Minute*30)
+	if resp.StatusCode == 403 {
+		log.Printf("%s: %v blocked because of waf response %v", p.name, ip, resp.StatusCode)
+		p.wafCache.Set(ip, nil)
 		return
 	}
 }
 func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 	uniqIPs := make(map[string]struct{})
-
 	if xff := req.Header.Get("x-forwarded-for"); xff != "" {
 		for _, ip := range strings.Split(xff, ",") {
 			ip = strings.TrimSpace(ip)
@@ -168,65 +165,74 @@ func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 			uniqIPs[ip] = struct{}{}
 		}
 	}
-
 	var ips []string
 	for ip := range uniqIPs {
 		ips = append(ips, ip)
 	}
-
 	return ips
 }
 func (p Plugin) CheckAllowed(ip string) bool {
-	if _, notFound := p.geoCache.GetIFPresent(ip); notFound == nil || p.isAllowIP(ip) || p.isAllowArea(ip) {
+	if p.isAllowIP(ip) || p.isAllowArea(ip) {
 		return true
 	} else {
 		return false
 	}
 }
 func (p Plugin) isAllowIP(ip string) bool {
-	ipAddress := net.ParseIP(ip)
-	isPrivateIp := p.IsPrivateIP(ipAddress, p.privateIPRanges)
-
-	if isPrivateIp && p.allowPrivate {
+	if _, notFound := p.allowedCache.GetIFPresent(ip); notFound == nil {
+		//hit
 		return true
-	} else if isPrivateIp && !p.allowPrivate {
-
 	} else {
-		if len(p.allowedIps) > 0 {
-			for _, allowedIp := range p.allowedIps {
-				if strings.Contains(allowedIp, "/") {
-					_, ipv4Net, err := net.ParseCIDR(allowedIp)
-					if err != nil {
-						continue
-					}
-					if ipv4Net.Contains(net.ParseIP(ip)) {
-						return true
-					}
-				} else {
-					allowedIpStr := net.ParseIP(allowedIp)
-					if ip == allowedIpStr.String() {
-						return true
+		ipAddress := net.ParseIP(ip)
+		isPrivateIp := p.IsPrivateIP(ipAddress, p.privateIPRanges)
+		if isPrivateIp {
+			if p.allowPrivate {
+				p.allowedCache.Set(ip, nil)
+				return true
+			}
+		} else {
+			if len(p.allowedIps) > 0 {
+				for _, allowedIp := range p.allowedIps {
+					if strings.Contains(allowedIp, "/") {
+						_, ipv4Net, err := net.ParseCIDR(allowedIp)
+						if err != nil {
+							continue
+						}
+						if ipv4Net.Contains(net.ParseIP(ip)) {
+							p.allowedCache.Set(ip, nil)
+							return true
+						}
+					} else {
+						allowedIpStr := net.ParseIP(allowedIp)
+						if ip == allowedIpStr.String() {
+							p.allowedCache.Set(ip, nil)
+							return true
+						}
 					}
 				}
 			}
 		}
+		return false
 	}
-	return false
 }
 func (p Plugin) isAllowArea(ip string) bool {
-	if len(p.allowedCountries) > 0 {
-		if record, err := p.db.Get_country_short(ip); err == nil {
-			countryCode := record.Country_short
-			log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
-			for i := 0; i < len(p.allowedCountries); i++ {
-				if p.allowedCountries[i] == countryCode {
-					p.geoCache.Set(ip, nil)
-					return true
+	if _, notFound := p.geoCache.GetIFPresent(ip); notFound == nil {
+		return true
+	} else {
+		if len(p.allowedCountries) > 0 {
+			if record, err := p.db.Get_country_short(ip); err == nil {
+				countryCode := record.Country_short
+				log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
+				for i := 0; i < len(p.allowedCountries); i++ {
+					if p.allowedCountries[i] == countryCode {
+						p.geoCache.Set(ip, nil)
+						return true
+					}
 				}
 			}
 		}
+		return false
 	}
-	return false
 }
 func (p Plugin) IsPrivateIP(ip net.IP, privateIPBlocks []*net.IPNet) bool {
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
