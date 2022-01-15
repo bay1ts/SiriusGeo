@@ -19,8 +19,6 @@ var httpClient = &http.Client{
 	Timeout: time.Second * 2,
 }
 
-//var cache = make(map[string]struct{})
-
 type Config struct {
 	DatabaseFilePath     string   // Path to ip2location database file
 	AllowedCountries     []string // Whitelist of countries to allow (ISO 3166-1 alpha-2)
@@ -32,7 +30,7 @@ type Config struct {
 
 func CreateConfig() *Config {
 	return &Config{
-		DatabaseFilePath:     "/db/IP2LOCATION-LITE-DB1.BIN",
+		//DatabaseFilePath:     "/db/IP2LOCATION-LITE-DB1.BIN",
 		AllowedCountries:     []string{},
 		AllowedIP:            []string{},
 		AllowPrivate:         true,
@@ -44,13 +42,15 @@ type Plugin struct {
 	next                 http.Handler
 	name                 string
 	db                   *ip2location.DB
-	lruCache             gcache.Cache
+	wafCache             gcache.Cache
+	geoCache             gcache.Cache
 	modSecurityUrl       string
 	allowedCountries     []string
 	allowedIps           []string
 	allowPrivate         bool
 	disallowedStatusCode int
 	privateIPRanges      []*net.IPNet
+	counter              *int
 }
 
 func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http.Handler, error) {
@@ -69,7 +69,9 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		return nil, fmt.Errorf("%s: failed to open database: %w", name, err)
 	}
 
-	lruCache := gcache.New(1024).LRU().Build()
+	wafCache := gcache.New(2048).LRU().Build()
+	geoCache := gcache.New(10240).LRU().Expiration(time.Minute * 30).Build()
+	c := 0
 	return &Plugin{
 		db:                   db,
 		next:                 next,
@@ -80,7 +82,9 @@ func New(ctx context.Context, next http.Handler, cfg *Config, name string) (http
 		disallowedStatusCode: cfg.DisallowedStatusCode,
 		modSecurityUrl:       cfg.ModSecurityUrl,
 		privateIPRanges:      InitPrivateIPBlocks(),
-		lruCache:             lruCache,
+		wafCache:             wafCache,
+		geoCache:             geoCache,
+		counter:              &c,
 	}, nil
 }
 func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -92,6 +96,27 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		p.next.ServeHTTP(rw, req)
 		return
 	}
+	*p.counter += 1
+	log.Printf("%s: access count %v", p.name, *p.counter)
+	if *p.counter >= 5 {
+		*p.counter = 0
+		log.Printf("%s: geoCache hit rate= %v,wafCache hit rate= %v", p.name, p.geoCache.HitRate(), p.wafCache.HitRate())
+	}
+	for _, ip := range p.GetRemoteIPs(req) {
+		if _, notFound := p.wafCache.GetIFPresent(ip); notFound == nil || !p.CheckAllowed(ip) {
+			//if p.wafCache.Has(ip) || !p.CheckAllowed(ip) {
+			log.Printf("%s: %v access denied", p.name, ip)
+			rw.WriteHeader(p.disallowedStatusCode)
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			rw.Write([]byte(fmt.Sprintf("<h1>Your IP [%s] is denied to access</h1>", ip)))
+			return
+		} else {
+			go p.CallWaf(ip, rw, req)
+		}
+	}
+	p.next.ServeHTTP(rw, req)
+}
+func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, req *http.Request) {
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -109,22 +134,6 @@ func (p Plugin) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	for h, val := range req.Header {
 		proxyReq.Header[h] = val
 	}
-	for _, ip := range p.GetRemoteIPs(req) {
-		//if _, v := cache[ip]; v || !p.CheckAllowed(ip) {
-		if p.lruCache.Has(ip) || !p.CheckAllowed(ip) {
-			log.Printf("%s: %v", p.name, "禁止访问")
-			rw.WriteHeader(p.disallowedStatusCode)
-			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
-			rw.Write([]byte(fmt.Sprintf("Your IP {%s} is denied to access", ip)))
-			return
-		} else {
-			//waf
-			go p.CallWaf(ip, rw, proxyReq)
-		}
-	}
-	p.next.ServeHTTP(rw, req)
-}
-func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, proxyReq *http.Request) {
 	resp, err := httpClient.Do(proxyReq)
 	if err != nil {
 		return
@@ -132,9 +141,9 @@ func (p Plugin) CallWaf(ip string, rw http.ResponseWriter, proxyReq *http.Reques
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		//block
-		log.Printf("%s: %v触发防火墙", p.name, ip)
+		log.Printf("%s: %v 触发防火墙", p.name, ip)
 		//cache[ip] = struct{}{}
-		p.lruCache.SetWithExpire(ip, nil, time.Minute*30)
+		p.wafCache.SetWithExpire(ip, nil, time.Minute*30)
 		return
 	}
 }
@@ -168,7 +177,7 @@ func (p Plugin) GetRemoteIPs(req *http.Request) []string {
 	return ips
 }
 func (p Plugin) CheckAllowed(ip string) bool {
-	if p.isAllowIP(ip) || p.isAllowArea(ip) {
+	if _, notFound := p.geoCache.GetIFPresent(ip); notFound == nil || p.isAllowIP(ip) || p.isAllowArea(ip) {
 		return true
 	} else {
 		return false
@@ -208,14 +217,10 @@ func (p Plugin) isAllowArea(ip string) bool {
 	if len(p.allowedCountries) > 0 {
 		if record, err := p.db.Get_country_short(ip); err == nil {
 			countryCode := record.Country_short
-			if countryCode == "-" {
-				if p.allowPrivate {
-					return true
-				}
-			}
 			log.Printf("%s: %s belongs to %v", p.name, ip, countryCode)
 			for i := 0; i < len(p.allowedCountries); i++ {
 				if p.allowedCountries[i] == countryCode {
+					p.geoCache.Set(ip, nil)
 					return true
 				}
 			}
